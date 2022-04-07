@@ -1,0 +1,316 @@
+---
+title: "Tyrese Maxey's Three Point%"
+author: "Patrick Ward"
+date: "4/6/2022"
+output: html_document
+---
+
+## Aim
+
+Some friends were discussing Philadelphia 76er's point guard, Tyrese Maxey's, three point% today. They were discussing how well he has performed over 72 games with a success rate of 43% behind the arc (at the time this data was scraped, 4/6/2022). While his percentage from 3pt range is very impressive I did notice that he has 294 attempts, which is less than 3 out of the 4 player's that are ahead of him (Kyrie only has 214 attempts and he is ranked 3rd at the time of this writing) and Steph Curry is just behind Maxey in the ranking (42.4% 3pt%) with nearly 70 more attempts.
+
+The question becomes, how can we be of Maxey's three point percentage relative to those with more attempts? We will take a Bayesian approach, using a beta conjugate, to consider the success rate of these players relative to what we believe the average three point success rate is for an NBA shooter (our prior), which we will determine from observing 3 point shooting over previous 3 seasons.
+
+**NOTE 1:** On `basketball-reference.com`, they have a nice check box that automatically will filter out players that are non-qualifiers for rate stats. After playing around with this, it appears that 200 attempts is their cut off. So, I will keep that and filter the data down to only those with 200 or more 3pt attempts once I've scraped all the data.
+
+**NOTE 2:** To run this with the data up to 4/6/21, load the csv files.
+
+## Load Packages & Get Data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+suppressPackageStartupMessages({
+  suppressWarnings({
+    library(tidyverse)
+    library(rvest)
+    library(ggalt)
+  })
+})
+
+theme_set(theme_minimal() +
+            theme(axis.text = element_text(face = "bold")))
+
+
+## Scrape 2021-2022 season --------------------------------------------------------------
+url2022 <- read_html("https://www.basketball-reference.com/leagues/NBA_2022_totals.html")
+
+tbl2022 <- html_nodes(url2022, 'table') %>% 
+  html_table(fill = TRUE) %>% 
+  pluck(1) %>%
+  janitor::clean_names() %>%
+  select("player", three_pt_att = "x3pa", three_pt_made = "x3p", three_pt_pct = "x3p_percent") %>%
+  filter(player != "Player") %>%
+  mutate(across(.cols = three_pt_att:three_pt_pct,
+                ~as.numeric(.x))) %>%
+  filter(!is.na(three_pt_pct),
+         three_pt_att >= 200) %>%
+  arrange(desc(three_pt_pct))
+
+tbl2022 %>% 
+  head()
+
+## Scrape previous 3 seasons --------------------------------------------------------------
+seasons <- seq(from = 2019, to = 2021, by = 1)
+
+urls <- paste0("https://www.basketball-reference.com/leagues/NBA_", seasons, "_totals.html")
+
+dat <- lapply(urls, function(i){
+	
+	# loop over each webpage
+	webpage <- read_html(i)
+	
+	# extract tables
+	table_info <- html_nodes(webpage, 'table') %>% 
+    html_table(fill = TRUE) %>% 
+    pluck(1) %>%
+    janitor::clean_names() %>%
+    select("player", three_pt_att = "x3pa", three_pt_made = "x3p", three_pt_pct = "x3p_percent") %>%
+    filter(player != "Player") %>%
+    mutate(across(.cols = three_pt_att:three_pt_pct,
+                ~as.numeric(.x))) %>%
+    filter(!is.na(three_pt_pct),
+           three_pt_att >= 200) %>%
+    arrange(desc(three_pt_pct))
+	
+})
+
+prev_seasons <- do.call(rbind, dat)
+prev_seasons %>% 
+  head()
+
+# write.csv(tbl2022, "2022_NBA_totals_on_04-06-2022.csv")
+# write.csv(prev_seasons, "2019-2021_NBA_totals.csv")
+
+```
+
+
+## EDA
+
+Visualize the top 10 3pt% shooters this season
+
+```{r}
+tbl2022 %>%
+  arrange(desc(three_pt_pct)) %>%
+  slice(1:10) %>%
+  ggplot(aes(x = three_pt_pct, y = reorder(player, three_pt_pct), size = three_pt_att)) +
+  geom_point() +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(x = "3pt %",
+       y = NULL,
+       size = "Attempts",
+       title = "Top 10 Three Point Shooters in 2022 (as of 4/6/2021)",
+       subtitle = "200 attempts to qualify",
+       caption = "Data Source: https://www.basketball-reference.com/leagues/NBA_2022_totals.html")
+```
+
+
+What is the distribution of three point attempts & three point percent?
+
+```{r}
+par(mfrow = c(1,2))
+hist(tbl2022$three_pt_att,
+     main = "Three Point Attempts",
+     xlab = "Attempts")
+hist(tbl2022$three_pt_pct,
+     main = "Three Point %",
+     xlab = "3pt %")
+```
+
+
+## Establishing our prior
+
+Since we are dealing with a binary outcome of successes (made the shot) and failures (missed the shot) we will use the `beta` distribution, which is the conjugate prior for the binomial distribution.
+
+The `beta` distribution has two parameters, `alpha` and `beta`. To determine what these parameters should be, we will use the method of moments with the data from the previous three seasons.
+
+To do this, we need to first find the mean and variance for the previous three seasons.
+
+```{r}
+prev_seasons_avg <- mean(prev_seasons$three_pt_pct)
+prev_seasons_var <- var(prev_seasons$three_pt_pct)
+
+prev_seasons_avg
+prev_seasons_var
+
+# population SD
+sqrt(prev_seasons_var)
+```
+
+
+Next, we create a function that allows us to determine `alpha` and `beta` using the mean and variance from the data.
+
+```{r}
+# function for calculating alpha and beta
+beta_parameters <- function(dist_avg, dist_var){
+  alpha <- dist_avg * (dist_avg * (1 - dist_avg)/dist_var - 1)
+  beta <- alpha * (1 - dist_avg)/dist_avg
+  list(alpha = alpha,
+       beta = beta)
+}
+
+
+# try out the function
+beta_parameters(dist_avg = prev_seasons_avg, dist_var = prev_seasons_var)
+```
+
+
+The function works to produce the two parameters we need. The data is returned in list format, so we will call each element of the list and store the respective values in their own variable.
+
+
+```{r}
+# extract alpha and beta from the list
+alpha <- beta_parameters(dist_avg = prev_seasons_avg, dist_var = prev_seasons_var)$alpha
+
+beta <- beta_parameters(dist_avg = prev_seasons_avg, dist_var = prev_seasons_var)$beta
+
+# show that the alpha and beta parameter produce the mean and SD of the population
+alpha / (alpha + beta)
+
+sqrt((alpha * beta) / ((alpha + beta)^2 * (alpha + beta + 1)))
+```
+
+
+An `alpha` parameter of 61.8 and a `beta` parameter of 106.2 have been determined from the previous 3 seasons of data and we can see, with some simple math, that those two parameters produce the mean and standard deviation of the historic data.
+
+We can also plot this distribution.
+
+```{r}
+plot(density(rbeta(n = 1e6,
+               shape1 = alpha,
+               shape2 = beta)),
+     type = "l",
+     xlim = c(0.2, 0.55),
+     xlab = '3pt %',
+     main = "Beta Distribution of 3pt% from 2019-2021")
+abline(v = alpha / (alpha + beta),
+       lwd = 4,
+       lty = 2,
+       col = "red")
+```
+
+
+
+### Update the 3pt% of the players in the 2022 season with our beta prior
+
+We calculate our Bayes adjusted three point percentage for the players by adding their successes to `alpha` and their failures to `beta` and then calculating the new posterior percentage as 
+
+$alpha / (alpha + beta)$ 
+
+and the posterior standard deviation as 
+
+$sqrt((alpha * beta) / ((alpha + beta)^2 * (alpha + beta + 1)))$
+
+```{r}
+tbl2022 <- tbl2022 %>%
+  mutate(three_pt_missed = three_pt_att - three_pt_made,
+         posterior_alpha = three_pt_made + alpha,
+         posterior_beta = three_pt_missed + beta,
+         posterior_three_pt_pct = posterior_alpha / (posterior_alpha + posterior_beta),
+         posterior_three_pt_sd = sqrt((posterior_alpha * posterior_beta) / ((posterior_alpha + posterior_beta)^2 * (posterior_alpha + posterior_beta + 1))))
+
+tbl2022 %>%
+  head() %>%
+  knitr::kable()
+```
+
+
+Have any of the players in the top 10 changes following in the adjustment?
+
+```{r}
+top10_3pt <- tbl2022 %>%
+  arrange(desc(three_pt_pct)) %>%
+  slice(1:10) %>%
+  select(player, three_pt_att, three_pt_pct)
+
+top10_posterior_3pt <- tbl2022 %>%
+  arrange(desc(posterior_three_pt_pct)) %>%
+  slice(1:10) %>%
+  select(player, posterior_three_pt_pct)
+
+top10_3pt %>%
+  bind_cols(top10_posterior_3pt) %>%
+  rename("Player Observed 3pt %" = player...1,
+         "Player Posterior 3pt %" = player...4)
+
+```
+
+* We see that Desmond Bane has jumped Kyrie, who only had 214 attempts. Kyrie dropped from 3rd to 6th.
+* Tyrese Maxey moves up one spot to 4.
+* Grant Williams drops out of the top 10 while Tyrese Haliburton moves up into the top 10
+
+
+We can plot the results of these top 10 players showing the posterior Bayes three point% relative to their observed three point%.
+
+```{r}
+tbl2022 %>%
+  arrange(desc(posterior_three_pt_pct)) %>%
+  slice(1:10) %>%
+  ggplot(aes(x = three_pt_pct, xend = posterior_three_pt_pct, y = reorder(player, posterior_three_pt_pct))) +
+  geom_dumbbell(color = "black",
+                size = 1.2,
+                colour_x = "green",
+                colour_xend = "blue",
+                size_x = 6,
+                size_xend = 6) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(x = "3pt %",
+       y = NULL,
+       title = "Top 10 Three Point Shooters in 2022 (as of 4/6/2021)",
+       subtitle = "Blue = Posterior Adjusted | Green = Observed Performance\n200 attempts to qualify",
+       caption = "Data Source: https://www.basketball-reference.com/leagues/NBA_2022_totals.html")
+  
+```
+
+
+### Show the uncertainty in Tyrese Maxies Performance versus Luke Kennard, who has 409 attempts
+
+```{r}
+kennard <- tbl2022 %>%
+  filter(player == "Luke Kennard")
+
+maxey <- tbl2022 %>%
+  filter(player == "Tyrese Maxey")
+
+plot(density(rbeta(n = 1e6, shape1 = maxey$posterior_alpha, shape2 = maxey$posterior_beta)),
+     col = "blue",
+     lwd = 4,
+     ylim = c(0, 20),
+     xlab = "3pt %",
+     main = "Bayes Adjusted 3pt%\nBlue = Tyrese Maxey | Red = Luke Kennard")
+lines(density(rbeta(n = 1e6, shape1 = kennard$posterior_alpha, shape2 = kennard$posterior_beta)),
+      col = "red",
+      lwd = 4)
+
+```
+
+
+If we sample from the posterior for both players, how much better is Kennard?
+
+```{r}
+maxey_sim <- rbeta(n = 1e6, shape1 = maxey$posterior_alpha, shape2 = maxey$posterior_beta)
+
+kennard_sim <- rbeta(n = 1e6, shape1 = kennard$posterior_alpha, shape2 = kennard$posterior_beta)
+
+plot(density(kennard_sim - maxey_sim),
+     lwd = 4,
+     col = "black",
+     main = "Kennard Posterior Sim - Maxie Posterior Sim",
+     xlab = "Difference between Kennard & Maxie")
+abline(v = 0,
+       lwd = 4,
+       lty = 2,
+       col = "red")
+
+## On average, how many simulations was Kennard better than Maxey
+mean(kennard_sim > maxey_sim)
+
+## Alternative way to solve the same question
+diff <- kennard_sim - maxey_sim
+mean(diff > 0)
+
+## Another approach to answer the question
+pnorm(0, mean = mean(diff), sd = sd(diff), lower.tail = FALSE)
+
+```
+
